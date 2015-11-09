@@ -34,7 +34,9 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
         
         // Get UUID of monitored channel. It needs because special subscription
         // myevents and subscription to multicast events do not function in 
-        // cooperate
+        // cooperate. Then we will use multicast CHANNEL_ANSWER and 
+        // CHANNEL_HANGUP rather than myevents. UUID is identifier that help as
+        // to distinguish events of our channel from events of another channels.
         uuid = getUUID(event);
         
         // Perform event subcriptions
