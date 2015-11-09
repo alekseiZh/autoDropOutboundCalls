@@ -24,7 +24,7 @@ public class AutoDropOutboundCalls {
      * @param args the command line arguments
      */
     public static void main(String[] args) {
-        // TODO code application logic here
+        
         SocketClient client = new SocketClient(48123, new SimplePipelineFactory());
         
         client.start();

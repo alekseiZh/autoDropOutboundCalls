@@ -29,18 +29,36 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
     }
 
     @Override
-    protected void handleConnectResponse(ChannelHandlerContext ctx, EslEvent event) {
+    protected void handleConnectResponse(ChannelHandlerContext ctx, 
+            EslEvent event) {
+        
+        // Get UUID of monitored channel. It needs because special subscription
+        // myevents and subscription to multicast events do not function in 
+        // cooperate
         uuid = getUUID(event);
+        
+        // Perform event subcriptions
         eventSubscription(ctx.getChannel());
+        
+        // Perform transfer action of the channel, because we wont to manipulate
+        // of further call routing through traditional dialplan.
         transfer(ctx.getChannel(), event);
     }
 
     @Override
     protected void handleEslEvent(ChannelHandlerContext ctx, EslEvent event) {
-        
+        /*
+        We need to handle 3 types of events:
+        1) CHANNEL_ANSWER. When handler receives this event, it need to check 
+        whether it relates to its channel. If it is, then handler check whether
+        the answer on other channel before. If not, he fires CUSTOM event with
+        specific subclass (replycenter::dropneedlesoutboundcalls), that used
+        to inform rest of handlers about received answer.
+        */
         switch (event.getEventName()) {
             
             case "CHANNEL_ANSWER":
+                // It is event of our channel?
                 if (event.getEventHeaders().get("Unique-ID").equals(uuid)) {
                     
                     log.info(
@@ -48,7 +66,8 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                             event.getEventHeaders().
                                     get("Caller-Destination-Number")
                     );
-
+                    
+                    // If other handlers have not received the answer event
                     if (!sharedParameters.isAnswerDetected()) {
                         log.info("Drop all another calls.");
                         myChannelAnswered = true;
@@ -61,6 +80,11 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                 }
                 break;
                 
+        /*
+        2) CUSTOM. If handler receives event of this type, then it concludes,
+        that another channel CHANNEL_ANSWER event obtained. If so, handler 
+        perform hangup application on its own channel.
+        */
             case "CUSTOM":
                 log.info("Received drop request. If received answer not {}", 
                         "in my channel, i will hangup my call.");
@@ -68,14 +92,31 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                     log.info("It is not my answer. So i will drop my call now.");
                     hangup(ctx.getChannel());
                 }
-            
+        /*
+        3) CHANNEL_HANGUP. After we drop all needless calls state of current 
+        session remain "answered". When "winner" channell hangup, we need to
+        reset state. If myChannelAnswered is true, then this handler is that
+        which received answer. Other handlers will ignore CHANNEL_HANGUP event.
+        */
             case "CHANNEL_HANGUP":
-                if (myChannelAnswered) {
-                    sharedParameters.setAnswerDetected(false);
+                if (event.getEventHeaders().get("Unique-ID").equals(uuid)) {
+                    if (myChannelAnswered) {
+                        sharedParameters.setAnswerDetected(false);
+                    }
                 }
         }
     }
     
+    /**
+     * Send to FS event of type CUSTOM with custom subclass.
+     * 
+     * @param channel
+     * Current channel
+     * @param eventName
+     * Event name. May be any that you like.
+     * @param subClass 
+     * Subclass of event. See documentation of Freeswitch to details.
+     */
     private void sendCustomEvent(Channel channel, String eventName, 
             String subClass) {
         
@@ -94,6 +135,13 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
         }
     }
     
+    /**
+     * Perform FS event subscription: 
+     * <br/> event plain CHANNEL_ANSWER CHANNEL_HANGUP
+     * <br/> event plain CUSTOM replycenter::dropneedlesoutboundcalls
+     * @param channel 
+     * Current channel.
+     */
     private void eventSubscription(Channel channel) {
         
         EslMessage response = sendSyncSingleLineCommand(channel, 
@@ -118,7 +166,12 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                     response.getHeaderValue(EslHeaders.Name.REPLY_TEXT));
         }
     }
-
+    
+    /**
+     * Perform hangup action on channel.
+     * @param channel
+     * Current channel.
+     */
     private void hangup(Channel channel) {
         
         SendMsg hangupMsg = new SendMsg();
@@ -136,7 +189,19 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                     response.getHeaderValue(EslHeaders.Name.REPLY_TEXT));
         }
     }
-
+    
+    /**
+     * Execute transfer application on channel. Transfer destionation -- 
+     * specific dialplan instance which name is drop_needless_oubound_calls.
+     * In fact application, that will be executed looks like:
+     * <br/> transfer dstNumber XML drop_needless_oubound_calls.
+     * <br/> where dstNumber is number, that we get from event.
+     * @param channel
+     * Current channel.
+     * @param event 
+     * Initial event in response from Freeswitch. Needs to get destination 
+     * number.
+     */
     private void transfer(Channel channel, EslEvent event) {
         
         String dstExt = event.getEventHeaders().get("Caller-Destination-Number");
@@ -160,7 +225,14 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
         }
         
     }
-
+    
+    /**
+     * Get UUID from event.
+     * @param event
+     * Event from FreeSWITCH.
+     * @return 
+     * UUID of channel.
+     */
     private String getUUID(EslEvent event) {
         return event.getEventHeaders().get("Unique-ID");
     }
