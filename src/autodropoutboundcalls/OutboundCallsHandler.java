@@ -5,7 +5,6 @@
  */
 package autodropoutboundcalls;
 
-import java.util.ArrayList;
 import org.freeswitch.esl.client.outbound.AbstractOutboundClientHandler;
 import org.freeswitch.esl.client.transport.SendMsg;
 import org.freeswitch.esl.client.transport.event.EslEvent;
@@ -18,10 +17,9 @@ import org.jboss.netty.channel.ChannelHandlerContext;
  *
  * @author zh
  */
-class OutboundCallsHandler extends AbstractOutboundClientHandler {
+public class OutboundCallsHandler extends AbstractOutboundClientHandler {
     
-    private SharedParameters sharedParameters;
-    private String uuid = "";
+    private String uuid;
     private final DBInterface dbi = new DBInterface(
             "jdbc:jtds:sqlserver://127.0.0.1:1433;"
                     + "databaseName=Callcenter;"
@@ -32,10 +30,11 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
     private String destination;
     private String taskName;
     
-    public OutboundCallsHandler(SharedParameters sharedParameters) {
-        this.sharedParameters = sharedParameters;
-    }
-
+    /**
+     *
+     * @param ctx
+     * @param event
+     */
     @Override
     protected void handleConnectResponse(ChannelHandlerContext ctx, 
             EslEvent event) {
@@ -53,11 +52,11 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
         // Get operators group ID
         groupID = getGroupID(event);
         
-        // Get intance of SharedParameters. It need to process few of outbound
-        // calls tasks. outbound_call_task_id - special channel variable, that
-        // idetify certain task. If variable outbound_call_task_id not found
-        // then 
-        createSharedParameters(event, "variable_outbound_call_task_id");
+        // Get task unique name
+        taskName = getTaskName(event);
+        
+        // Register handler for idle operator count monitoring
+        OperMonitor.registerCallsHandler(this);
         
         // Perform event subcriptions
         eventSubscription(ctx.getChannel());
@@ -72,10 +71,8 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
         /*
         We need to handle 3 types of events:
         1) CHANNEL_ANSWER. When handler receives this event, it need to check 
-        whether it relates to its channel. If it is, then handler check whether
-        the answer on other channel before. If not, he fires CUSTOM event with
-        specific subclass (replycenter::dropneedlessoutboundcalls), that used
-        to inform rest of handlers about received answer.
+        whether it relates to its channel. If it is, a handler unregiters from
+        operator monitor, and this call never be hanged up by this service.
         */
         switch (event.getEventName()) {
             
@@ -85,64 +82,36 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                     
                     log.info("Dst: {} : Channel answered.", destination);
                     
-                    synchronized(sharedParameters) {
-                        int n = dbi.numberOfIdleOpers(groupID);
-                        
-                        if (n > 0) {
-                            blockHandler(ctx.getChannel());
-                        } else {
-                            blockHandler(ctx.getChannel());
-                            
-                            log.info("Dst: {} : Drop all another calls.", 
-                                    destination);
-                            sendCustomEvent(
-                                ctx.getChannel(), 
-                                "DROP_ANOTHER_CALLS", 
-                                "replycenter::dropneedlessoutboundcalls"
-                            );
-                        }
-                    }
+                    // Unregister handler for operators count monitoring
+                    OperMonitor.unregisterCallsHandler(this);
+                    
+                    // No need to events from FS now
+                    blockHandler(ctx.getChannel());
+                }
+                break;
+        /*
+        2) CHANNEL_HANGUP. If call hanged up before answer or before service do
+        that hangup, then we need to manually unregister this handler.
+        */
+            case "CHANNEL_HANGUP":
+                if (event.getEventHeaders().get("Unique-ID").equals(uuid)) {
+                    // Unregister handler for operators count monitoring
+                    OperMonitor.unregisterCallsHandler(this);
                 }
                 break;
                 
         /*
         2) CUSTOM. If handler receives event of this type, then it concludes,
-        that another channel CHANNEL_ANSWER event obtained. If so, handler 
-        perform hangup application on its own channel.
+        that another channel CHANNEL_ANSWER event obtained and there is no idle 
+        operators. If so, handler perform hangup application on its own channel
+        and unregisters from operators monitor.
         */
             case "CUSTOM":
                 log.info("Dst: {} : Received drop request. Hangup call now.", 
                         destination);
                 hangup(ctx.getChannel());
+                OperMonitor.unregisterCallsHandler(this);
                 break;
-        }
-    }
-    
-    /**
-     * Send to FS event of type CUSTOM with custom subclass.
-     * 
-     * @param channel
-     * Current channel
-     * @param eventName
-     * Event name. May be any that you like.
-     * @param subClass 
-     * Subclass of event. See documentation of Freeswitch to details.
-     */
-    private void sendCustomEvent(Channel channel, String eventName, 
-            String subClass) {
-        
-        ArrayList<String> msgLines = new ArrayList<>();
-        msgLines.add("sendevent " + eventName);
-        msgLines.add("Event-Subclass: " + subClass);
-        msgLines.add("Event-Name: CUSTOM");
-        
-        EslMessage response = sendSyncMultiLineCommand(channel, msgLines);
-
-        if (response.getHeaderValue(EslHeaders.Name.REPLY_TEXT)
-                .startsWith("+OK")) {
-            log.info("Dst: {} : Event {} was sent.", destination, eventName);
-        } else {
-            log.error("Dst: {} : Event {} was not sent.", destination, eventName);
         }
     }
     
@@ -185,7 +154,7 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
      * @param channel
      * Current channel.
      */
-    private void hangup(Channel channel) {
+    public void hangup(Channel channel) {
         
         SendMsg hangupMsg = new SendMsg();
         hangupMsg.addCallCommand("execute");
@@ -252,27 +221,6 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
     }
     
     /**
-     * Return outbound call task id from custom channel variable.
-     * @param event
-     * @param variableName
-     * @return
-     * TaskId string or "default" if variable not found in event.
-     */
-    private void createSharedParameters(EslEvent event, String variableName) {
-        
-        String taskId = event.getEventHeaders().get(variableName);
-        
-        if (taskId == null) {
-            taskId = "default";
-        }
-        
-        log.info("Dst: {} : TaskID: {}", destination, taskId);
-        
-        sharedParameters = SharedParameters.getSharedParametersInstance(taskId);
-        
-    }
-    
-    /**
      * Return value of channel variable outbound_task_group, which is represent 
      * id of group of operators, that serves current outbound task,
      * @param event
@@ -287,6 +235,23 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
             return 1;
         }
         return Integer.valueOf(id);
+    }
+    
+    /**
+     * Return value of channel variable outbound_task_name, which is represent 
+     * unique name of outbound task.
+     * @param event
+     * Event from which variable will be received.
+     * @return 
+     * Value of variable outbound_task_name.
+     */
+    private String getTaskName(EslEvent event) {
+        String name = event.getEventHeaders().get("variable_outbound_task_name");
+        log.info("Dst: {} : Task: {}", destination, name);
+        if (name == null) {
+            return "null";
+        }
+        return name;
     }
     
     /**
@@ -308,4 +273,14 @@ class OutboundCallsHandler extends AbstractOutboundClientHandler {
                     response.getHeaderValue(EslHeaders.Name.REPLY_TEXT));
         }
     }
+
+    public int getGroupID() {
+        return groupID;
+    }
+
+    public String getTaskName() {
+        return taskName;
+    }
+    
+    
 }

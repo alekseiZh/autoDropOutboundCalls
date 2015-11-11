@@ -13,12 +13,10 @@ import org.freeswitch.esl.client.outbound.AbstractOutboundPipelineFactory;
  * @author zh
  */
 public class SimplePipelineFactory extends AbstractOutboundPipelineFactory {
-    
-    private final SharedParameters sharedParameters = new SharedParameters();
 
     @Override
     protected AbstractOutboundClientHandler makeHandler() {
-        return new OutboundCallsHandler(sharedParameters);
+        return new OutboundCallsHandler();
     }
     
 }
